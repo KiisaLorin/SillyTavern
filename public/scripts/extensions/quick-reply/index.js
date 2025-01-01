@@ -1,219 +1,268 @@
-import { saveSettingsDebounced } from "../../../script.js";
-import { getContext, extension_settings } from "../../extensions.js";
-import { initScrollHeight, resetScrollHeight } from "../../utils.js";
+import { chat, chat_metadata, eventSource, event_types, getRequestHeaders } from '../../../script.js';
+import { extension_settings } from '../../extensions.js';
+import { QuickReplyApi } from './api/QuickReplyApi.js';
+import { AutoExecuteHandler } from './src/AutoExecuteHandler.js';
+import { QuickReply } from './src/QuickReply.js';
+import { QuickReplyConfig } from './src/QuickReplyConfig.js';
+import { QuickReplySet } from './src/QuickReplySet.js';
+import { QuickReplySettings } from './src/QuickReplySettings.js';
+import { SlashCommandHandler } from './src/SlashCommandHandler.js';
+import { ButtonUi } from './src/ui/ButtonUi.js';
+import { SettingsUi } from './src/ui/SettingsUi.js';
 
-export { MODULE_NAME };
 
-const MODULE_NAME = 'quick-reply';
-const UPDATE_INTERVAL = 1000;
+
+
+const _VERBOSE = true;
+export const debug = (...msg) => _VERBOSE ? console.debug('[QR2]', ...msg) : null;
+export const log = (...msg) => _VERBOSE ? console.log('[QR2]', ...msg) : null;
+export const warn = (...msg) => _VERBOSE ? console.warn('[QR2]', ...msg) : null;
+/**
+ * Creates a debounced function that delays invoking func until after wait milliseconds have elapsed since the last time the debounced function was invoked.
+ * @param {Function} func The function to debounce.
+ * @param {Number} [timeout=300] The timeout in milliseconds.
+ * @returns {Function} The debounced function.
+ */
+export function debounceAsync(func, timeout = 300) {
+    let timer;
+    /**@type {Promise}*/
+    let debouncePromise;
+    /**@type {Function}*/
+    let debounceResolver;
+    return (...args) => {
+        clearTimeout(timer);
+        if (!debouncePromise) {
+            debouncePromise = new Promise(resolve => {
+                debounceResolver = resolve;
+            });
+        }
+        timer = setTimeout(() => {
+            debounceResolver(func.apply(this, args));
+            debouncePromise = null;
+        }, timeout);
+        return debouncePromise;
+    };
+}
+
+
+const defaultConfig = {
+    setList: [{
+        set: 'Default',
+        isVisible: true,
+    }],
+};
 
 const defaultSettings = {
-    quickReplyEnabled: false,
-    numberOfSlots: 5,
-    quickReplySlots: [],
-}
+    isEnabled: false,
+    isCombined: false,
+    config: defaultConfig,
+};
 
-async function loadSettings() {
-    if (Object.keys(extension_settings.quickReply).length === 0) {
-        Object.assign(extension_settings.quickReply, defaultSettings);
-    }
 
-    // If the user has an old version of the extension, update it
-    if (!Array.isArray(extension_settings.quickReply.quickReplySlots)) {
-        extension_settings.quickReply.quickReplySlots = [];
-        extension_settings.quickReply.numberOfSlots = defaultSettings.numberOfSlots;
+/** @type {Boolean}*/
+let isReady = false;
+/** @type {Function[]}*/
+let executeQueue = [];
+/** @type {QuickReplySettings}*/
+let settings;
+/** @type {SettingsUi} */
+let manager;
+/** @type {ButtonUi} */
+let buttons;
+/** @type {AutoExecuteHandler} */
+let autoExec;
+/** @type {QuickReplyApi} */
+export let quickReplyApi;
 
-        for (let i = 1; i <= extension_settings.quickReply.numberOfSlots; i++) {
-            extension_settings.quickReply.quickReplySlots.push({
-                mes: extension_settings.quickReply[`quickReply${i}Mes`],
-                label: extension_settings.quickReply[`quickReply${i}Label`],
-                enabled: true,
-            });
 
-            delete extension_settings.quickReply[`quickReply${i}Mes`];
-            delete extension_settings.quickReply[`quickReply${i}Label`];
-        }
-    }
 
-    initializeEmptySlots(extension_settings.quickReply.numberOfSlots);
-    generateQuickReplyElements();
 
-    for (let i = 1; i <= extension_settings.quickReply.numberOfSlots; i++) {
-        $(`#quickReply${i}Mes`).val(extension_settings.quickReply.quickReplySlots[i - 1]?.mes).trigger('input');
-        $(`#quickReply${i}Label`).val(extension_settings.quickReply.quickReplySlots[i - 1]?.label).trigger('input');
-    }
-
-    $('#quickReplyEnabled').prop('checked', extension_settings.quickReply.quickReplyEnabled);
-    $('#quickReplyNumberOfSlots').val(extension_settings.quickReply.numberOfSlots);
-}
-
-function onQuickReplyInput(id) {
-    extension_settings.quickReply.quickReplySlots[id - 1].mes = $(`#quickReply${id}Mes`).val();
-    $(`#quickReply${id}`).attr('title', ($(`#quickReply${id}Mes`).val()));
-    resetScrollHeight($(`#quickReply${id}Mes`));
-    saveSettingsDebounced();
-}
-
-function onQuickReplyLabelInput(id) {
-    extension_settings.quickReply.quickReplySlots[id - 1].label = $(`#quickReply${id}Label`).val();
-    $(`#quickReply${id}`).text($(`#quickReply${id}Label`).val());
-    saveSettingsDebounced();
-}
-
-async function onQuickReplyEnabledInput() {
-    let isEnabled = $(this).prop('checked')
-    extension_settings.quickReply.quickReplyEnabled = !!isEnabled;
-    if (isEnabled === true) {
-        $("#quickReplyBar").show();
-    } else { $("#quickReplyBar").hide(); }
-    saveSettingsDebounced();
-}
-
-async function sendQuickReply(index) {
-    const prompt = extension_settings.quickReply.quickReplySlots[index]?.mes || '';
-
-    if (!prompt) {
-        console.warn(`Quick reply slot ${index} is empty! Aborting.`);
-        return;
-    }
-
-    $("#send_textarea").val(prompt);
-    $("#send_but").trigger('click');
-}
-
-function addQuickReplyBar() {
-    $('#quickReplyBar').remove();
-    let quickReplyButtonHtml = '';
-
-    for (let i = 0; i < extension_settings.quickReply.numberOfSlots; i++) {
-        let quickReplyMes = extension_settings.quickReply.quickReplySlots[i]?.mes || '';
-        let quickReplyLabel = extension_settings.quickReply.quickReplySlots[i]?.label || '';
-        quickReplyButtonHtml += `<div title="${quickReplyMes}" class="quickReplyButton" data-index="${i}" id="quickReply${i + 1}">${quickReplyLabel}</div>`;
-    }
-
-    const quickReplyBarFullHtml = `
-        <div id="quickReplyBar" class="flex-container flexGap5">
-            <div id="quickReplies">
-                ${quickReplyButtonHtml}
-            </div>
-        </div>
-    `;
-
-    $('#send_form').prepend(quickReplyBarFullHtml);
-
-    $('.quickReplyButton').on('click', function () {
-        let index = $(this).data('index');
-        sendQuickReply(index);
+const loadSets = async () => {
+    const response = await fetch('/api/settings/get', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({}),
     });
-}
 
-async function moduleWorker() {
-    if (extension_settings.quickReply.quickReplyEnabled === true) {
-        $('#quickReplyBar').toggle(getContext().onlineStatus !== 'no_connection');
+    if (response.ok) {
+        const setList = (await response.json()).quickReplyPresets ?? [];
+        for (const set of setList) {
+            if (set.version !== 2) {
+                // migrate old QR set
+                set.version = 2;
+                set.disableSend = set.quickActionEnabled ?? false;
+                set.placeBeforeInput = set.placeBeforeInputEnabled ?? false;
+                set.injectInput = set.AutoInputInject ?? false;
+                set.qrList = set.quickReplySlots.map((slot,idx)=>{
+                    const qr = {};
+                    qr.id = idx + 1;
+                    qr.label = slot.label ?? '';
+                    qr.title = slot.title ?? '';
+                    qr.message = slot.mes ?? '';
+                    qr.isHidden = slot.hidden ?? false;
+                    qr.executeOnStartup = slot.autoExecute_appStartup ?? false;
+                    qr.executeOnUser = slot.autoExecute_userMessage ?? false;
+                    qr.executeOnAi = slot.autoExecute_botMessage ?? false;
+                    qr.executeOnChatChange = slot.autoExecute_chatLoad ?? false;
+                    qr.executeOnGroupMemberDraft = slot.autoExecute_groupMemberDraft ?? false;
+                    qr.executeOnNewChat = slot.autoExecute_newChat ?? false;
+                    qr.automationId = slot.automationId ?? '';
+                    qr.contextList = (slot.contextMenu ?? []).map(it=>({
+                        set: it.preset,
+                        isChained: it.chain,
+                    }));
+                    return qr;
+                });
+            }
+            if (set.version == 2) {
+                QuickReplySet.list.push(QuickReplySet.from(JSON.parse(JSON.stringify(set))));
+            }
+        }
+        // need to load QR lists after all sets are loaded to be able to resolve context menu entries
+        setList.forEach((set, idx)=>{
+            QuickReplySet.list[idx].qrList = set.qrList.map(it=>QuickReply.from(it));
+            QuickReplySet.list[idx].init();
+        });
+        log('sets: ', QuickReplySet.list);
     }
-}
+};
 
-async function onQuickReplyNumberOfSlotsInput() {
-    const $input = $('#quickReplyNumberOfSlots');
-    let numberOfSlots = Number($input.val());
-
-    if (isNaN(numberOfSlots)) {
-        numberOfSlots = defaultSettings.numberOfSlots;
-    }
-
-    // Clamp min and max values (from input attributes)
-    if (numberOfSlots < Number($input.attr('min'))) {
-        numberOfSlots = Number($input.attr('min'));
-    } else if (numberOfSlots > Number($input.attr('max'))) {
-        numberOfSlots = Number($input.attr('max'));
-    }
-
-    extension_settings.quickReply.numberOfSlots = numberOfSlots;
-    extension_settings.quickReply.quickReplySlots.length = numberOfSlots;
-
-    // Initialize new slots
-    initializeEmptySlots(numberOfSlots);
-
-    await loadSettings();
-    addQuickReplyBar();
-    moduleWorker();
-    saveSettingsDebounced();
-}
-
-function initializeEmptySlots(numberOfSlots) {
-    for (let i = 0; i < numberOfSlots; i++) {
-        if (!extension_settings.quickReply.quickReplySlots[i]) {
-            extension_settings.quickReply.quickReplySlots[i] = {
-                mes: '',
-                label: '',
-                enabled: true,
+const loadSettings = async () => {
+    if (!extension_settings.quickReplyV2) {
+        if (!extension_settings.quickReply) {
+            extension_settings.quickReplyV2 = defaultSettings;
+        } else {
+            extension_settings.quickReplyV2 = {
+                isEnabled: extension_settings.quickReply.quickReplyEnabled ?? false,
+                isCombined: false,
+                isPopout: false,
+                config: {
+                    setList: [{
+                        set: extension_settings.quickReply.selectedPreset ?? extension_settings.quickReply.name ?? 'Default',
+                        isVisible: true,
+                    }],
+                },
             };
         }
     }
-}
-
-function generateQuickReplyElements() {
-    let quickReplyHtml = '';
-
-    for (let i = 1; i <= extension_settings.quickReply.numberOfSlots; i++) {
-        quickReplyHtml += `
-        <div class="flex-container alignitemsflexstart">
-            <input class="text_pole wide30p" id="quickReply${i}Label" placeholder="(Add a button label)">
-            <textarea id="quickReply${i}Mes" placeholder="(custom message here)" class="text_pole widthUnset flex1" rows="2"></textarea>
-        </div>
-        `;
+    try {
+        settings = QuickReplySettings.from(extension_settings.quickReplyV2);
+    } catch (ex) {
+        settings = QuickReplySettings.from(defaultSettings);
     }
+};
 
-    $('#quickReplyContainer').empty().append(quickReplyHtml);
-
-    for (let i = 1; i <= extension_settings.quickReply.numberOfSlots; i++) {
-        $(`#quickReply${i}Mes`).on('input', function () { onQuickReplyInput(i); });
-        $(`#quickReply${i}Label`).on('input', function () { onQuickReplyLabelInput(i); });
+const executeIfReadyElseQueue = async (functionToCall, args) => {
+    if (isReady) {
+        log('calling', { functionToCall, args });
+        await functionToCall(...args);
+    } else {
+        log('queueing', { functionToCall, args });
+        executeQueue.push(async()=>await functionToCall(...args));
     }
+};
 
-    $('.quickReplySettings .inline-drawer-toggle').off('click').on('click', function () {
-        for (let i = 1; i <= extension_settings.quickReply.numberOfSlots; i++) {
-            initScrollHeight($(`#quickReply${i}Mes`));
-        }
-    });
-}
 
-jQuery(async () => {
 
-    moduleWorker();
-    setInterval(moduleWorker, UPDATE_INTERVAL);
-    const settingsHtml = `
-    <div class="quickReplySettings">
-        <div class="inline-drawer">
-            <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Quick Reply</b>
-            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-        </div>
-        <div class="inline-drawer-content">
-            <label class="checkbox_label marginBot10">
-                <input id="quickReplyEnabled" type="checkbox" />
-                    Enable Quick Replies
-            </label>
-            <label for="quickReplyNumberOfSlots">Number of slots:</label>
-            <div class="flex-container flexGap5 flexnowrap">
-                <input id="quickReplyNumberOfSlots" class="text_pole" type="number" min="1" max="100" value="" />
-                <div class="menu_button menu_button_icon" id="quickReplyNumberOfSlotsApply">
-                    <div class="fa-solid fa-check"></div>
-                    <span>Apply</span>
-                </div>
-            </div>
-            <small><i>Customize your Quick Replies:</i></small><br>
-            <div id="quickReplyContainer">
-            </div>
-        </div>
-    </div>`;
 
-    $('#extensions_settings2').append(settingsHtml);
-
-    $('#quickReplyEnabled').on('input', onQuickReplyEnabledInput);
-    $('#quickReplyNumberOfSlotsApply').on('click', onQuickReplyNumberOfSlotsInput);
-
+const init = async () => {
+    await loadSets();
     await loadSettings();
-    addQuickReplyBar();
-});
+    log('settings: ', settings);
 
+    manager = new SettingsUi(settings);
+    document.querySelector('#qr_container').append(await manager.render());
+
+    buttons = new ButtonUi(settings);
+    buttons.show();
+    settings.onSave = ()=>buttons.refresh();
+
+    window['executeQuickReplyByName'] = async(name, args = {}, options = {}) => {
+        let qr = [...settings.config.setList, ...(settings.chatConfig?.setList ?? [])]
+            .map(it=>it.set.qrList)
+            .flat()
+            .find(it=>it.label == name)
+            ;
+        if (!qr) {
+            let [setName, ...qrName] = name.split('.');
+            qrName = qrName.join('.');
+            let qrs = QuickReplySet.get(setName);
+            if (qrs) {
+                qr = qrs.qrList.find(it=>it.label == qrName);
+            }
+        }
+        if (qr && qr.onExecute) {
+            return await qr.execute(args, false, true, options);
+        } else {
+            throw new Error(`No Quick Reply found for "${name}".`);
+        }
+    };
+
+    quickReplyApi = new QuickReplyApi(settings, manager);
+    const slash = new SlashCommandHandler(quickReplyApi);
+    slash.init();
+    autoExec = new AutoExecuteHandler(settings);
+
+    eventSource.on(event_types.APP_READY, async()=>await finalizeInit());
+
+    window['quickReplyApi'] = quickReplyApi;
+};
+const finalizeInit = async () => {
+    debug('executing startup');
+    await autoExec.handleStartup();
+    debug('/executing startup');
+
+    debug(`executing queue (${executeQueue.length} items)`);
+    while (executeQueue.length > 0) {
+        const func = executeQueue.shift();
+        await func();
+    }
+    debug('/executing queue');
+    isReady = true;
+    debug('READY');
+};
+await init();
+
+const onChatChanged = async (chatIdx) => {
+    log('CHAT_CHANGED', chatIdx);
+    if (chatIdx) {
+        settings.chatConfig = QuickReplyConfig.from(chat_metadata.quickReply ?? {});
+    } else {
+        settings.chatConfig = null;
+    }
+    manager.rerender();
+    buttons.refresh();
+
+    await autoExec.handleChatChanged();
+};
+eventSource.on(event_types.CHAT_CHANGED, (...args)=>executeIfReadyElseQueue(onChatChanged, args));
+
+const onUserMessage = async () => {
+    await autoExec.handleUser();
+};
+eventSource.makeFirst(event_types.USER_MESSAGE_RENDERED, (...args)=>executeIfReadyElseQueue(onUserMessage, args));
+
+const onAiMessage = async (messageId) => {
+    if (['...'].includes(chat[messageId]?.mes)) {
+        log('QR auto-execution suppressed for swiped message');
+        return;
+    }
+
+    await autoExec.handleAi();
+};
+eventSource.makeFirst(event_types.CHARACTER_MESSAGE_RENDERED, (...args)=>executeIfReadyElseQueue(onAiMessage, args));
+
+const onGroupMemberDraft = async () => {
+    await autoExec.handleGroupMemberDraft();
+};
+eventSource.on(event_types.GROUP_MEMBER_DRAFTED, (...args) => executeIfReadyElseQueue(onGroupMemberDraft, args));
+
+const onWIActivation = async (entries) => {
+    await autoExec.handleWIActivation(entries);
+};
+eventSource.on(event_types.WORLD_INFO_ACTIVATED, (...args) => executeIfReadyElseQueue(onWIActivation, args));
+
+const onNewChat = async () => {
+    await autoExec.handleNewChat();
+};
+eventSource.on(event_types.CHAT_CREATED, (...args) => executeIfReadyElseQueue(onNewChat, args));

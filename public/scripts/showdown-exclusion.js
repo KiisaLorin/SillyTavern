@@ -3,13 +3,17 @@ import { power_user } from './power-user.js';
 // Showdown extension to make chat separators (dinkuses) ignore markdown formatting
 export const markdownExclusionExt = () => {
     if (!power_user) {
-        console.log("Showdown-dinkus extension: power_user wasn't found! Returning.");
-        return []
+        console.log('Showdown-dinkus extension: power_user wasn\'t found! Returning.');
+        return [];
     }
 
     let combinedExcludeString = '';
-    if (power_user.custom_chat_separator) {
-        combinedExcludeString += `${power_user.custom_chat_separator},`;
+    if (power_user.context.chat_start) {
+        combinedExcludeString += `${power_user.context.chat_start},`;
+    }
+
+    if (power_user.context.example_separator) {
+        combinedExcludeString += `${power_user.context.example_separator},`;
     }
 
     if (power_user.markdown_escape_strings) {
@@ -17,7 +21,7 @@ export const markdownExclusionExt = () => {
     }
 
     const escapedExclusions = combinedExcludeString
-        .split(",")
+        .split(',')
         .filter((element) => element.length > 0)
         .map((element) => `(${element.split('').map((char) => `\\${char}`).join('')})`);
 
@@ -27,10 +31,10 @@ export const markdownExclusionExt = () => {
         return [];
     }
 
-    const replaceRegex = new RegExp(`^(${escapedExclusions.join("|")})\n`, "gm");
+    const replaceRegex = new RegExp(`^(${escapedExclusions.join('|')})\n`, 'gm');
     return [{
-        type: "lang",
+        type: 'lang',
         regex: replaceRegex,
-        replace: ((match) => match.replace(replaceRegex, `\u0000${match} \n`))
+        replace: ((match) => match.replace(replaceRegex, `\u0000${match} \n`)),
     }];
-}
+};

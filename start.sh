@@ -1,4 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# Make sure pwd is the directory of the script
+cd "$(dirname "$0")"
 
 if ! command -v npm &> /dev/null
 then
@@ -21,14 +24,9 @@ then
     esac
 fi
 
-# if running on replit patch whitelist
-if [ ! -z "$REPL_ID" ]; then
-  echo -e "Running on Repl.it... \nPatching Whitelist..."
-  sed -i 's|whitelistMode = true|whitelistMode = false|g' "config.conf"
-fi
-
 echo "Installing Node Modules..."
-npm i --no-audit
+export NODE_ENV=production
+npm i --no-audit --no-fund --loglevel=error --no-progress --omit=dev
 
 echo "Entering SillyTavern..."
-node "$(dirname "$0")/server.js"
+node "server.js" "$@"
